@@ -2,48 +2,163 @@
 import logging
 import csv
 import os
+import sys
+import re
+import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler
 
+# تنظیم لاگ
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    level=logging.INFO,
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-# ----------------- تنظیمات (از متغیر محیطی خوانده می‌شوند) -----------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN")        # مقدار را در Railway وارد می‌کنیم
-CHANNEL_ID = os.environ.get("CHANNEL_ID")      # مثال: @YourChannelUsername یا -1001234567890
-ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))  # آیدی عددی ادمین
+# ----------------- تنظیمات -----------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHANNEL_ID = os.environ.get("CHANNEL_ID")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 
-if not BOT_TOKEN or not CHANNEL_ID or ADMIN_CHAT_ID == 0:
+if not all([BOT_TOKEN, CHANNEL_ID, ADMIN_CHAT_ID]):
     logger.error("لطفاً متغیرهای محیطی BOT_TOKEN، CHANNEL_ID و ADMIN_CHAT_ID را تنظیم کنید.")
-    raise SystemExit("Missing environment variables")
+    sys.exit(1)
 
+try:
+    ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
+except ValueError:
+    logger.error("ADMIN_CHAT_ID باید یک عدد باشد")
+    sys.exit(1)
+
+# فایل‌ها
 CSV_FILE = "submissions.csv"
+USED_CODES_FILE = "used_codes.json"
+VALID_CODES_FILE = "valid_codes.txt"
 
+# حالت‌های مکالمه
 CHECK_MEMBERSHIP, WAIT_CODE, WAIT_NAME, CONFIRM = range(4)
 
-def save_submission(data: dict):
-    header = ["user_id", "username", "code", "full_name"]
-    exists = False
+# ----------------- مدیریت کدها -----------------
+def load_valid_codes():
+    """بارگذاری کدهای معتبر از فایل - اگر فایل نبود خطا می‌دهد"""
     try:
-        with open(CSV_FILE, "r", newline="", encoding="utf-8") as f:
-            exists = True
+        with open(VALID_CODES_FILE, "r", encoding="utf-8") as f:
+            codes = {line.strip().upper() for line in f if line.strip()}
+            if not codes:
+                logger.error("❌ فایل valid_codes.txt خالی است! لطفاً کدهای خود را در این فایل قرار دهید.")
+                return set()
+            logger.info(f"✅ {len(codes)} کد معتبر از فایل بارگذاری شد")
+            return codes
     except FileNotFoundError:
-        exists = False
+        logger.error("❌ فایل valid_codes.txt پیدا نشد! لطفاً فایلی با ۲۵۰ کد معتبر ایجاد کنید.")
+        return set()
 
+def load_used_codes():
+    """بارگذاری کدهای استفاده شده"""
+    try:
+        with open(USED_CODES_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+
+def save_used_codes(used_codes):
+    """ذخیره کدهای استفاده شده"""
+    with open(USED_CODES_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(used_codes), f)
+
+def is_valid_code_format(code: str) -> bool:
+    """بررسی فرمت کد"""
+    if len(code) != 6:
+        return False
+    
+    # فقط حروف بزرگ انگلیسی و اعداد
+    pattern = r'^[A-Z0-9]{6}$'
+    return bool(re.match(pattern, code))
+
+def is_valid_code(code: str) -> tuple[bool, str]:
+    """بررسی کامل کد و بازگرداندن پیام خطا"""
+    code_upper = code.upper()
+    
+    # بررسی فرمت
+    if not is_valid_code_format(code_upper):
+        return False, f"❌ فرمت کد نامعتبر!\nکد باید ۶ کاراکتر و فقط شامل حروف بزرگ و اعداد انگلیسی باشد.\nمثال: ABC123"
+    
+    # بررسی وجود در لیست معتبر
+    valid_codes = load_valid_codes()
+    if not valid_codes:
+        return False, "❌ سیستم کدها آماده نیست. لطفاً با ادمین تماس بگیرید."
+    
+    if code_upper not in valid_codes:
+        return False, "❌ کد نامعتبر! این کد در سیستم وجود ندارد."
+    
+    # بررسی استفاده نشدن
+    used_codes = load_used_codes()
+    if code_upper in used_codes:
+        return False, "❌ این کد قبلاً استفاده شده است!"
+    
+    return True, "✅ کد معتبر است"
+
+def mark_code_as_used(code: str):
+    """علامت گذاری کد به عنوان استفاده شده"""
+    used_codes = load_used_codes()
+    used_codes.add(code.upper())
+    save_used_codes(used_codes)
+
+# ----------------- مدیریت کاربران -----------------
+def has_user_submitted(user_id: int) -> bool:
+    """بررسی می‌کند که کاربر قبلاً ثبت نام کرده یا نه"""
+    try:
+        if not os.path.exists(CSV_FILE):
+            return False
+            
+        with open(CSV_FILE, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row["user_id"] and int(row["user_id"]) == user_id:
+                    return True
+        return False
+    except Exception as e:
+        logger.error(f"خطا در بررسی ثبت نام کاربر: {e}")
+        return False
+
+def save_submission(data: dict):
+    """ذخیره اطلاعات در فایل CSV"""
+    header = ["user_id", "username", "code", "full_name"]
+    file_exists = os.path.isfile(CSV_FILE)
+    
     with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=header)
-        if not exists:
+        if not file_exists:
             writer.writeheader()
         writer.writerow({
             "user_id": data.get("user_id"),
             "username": data.get("username") or "",
-            "code": data.get("code"),
-            "full_name": data.get("full_name"),
+            "code": data.get("code", ""),
+            "full_name": data.get("full_name", ""),
         })
 
+# ----------------- دستورات ربات -----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # بررسی اینکه کاربر قبلاً ثبت نام کرده یا نه
+    if has_user_submitted(user.id):
+        await update.message.reply_text(
+            "❌ شما قبلاً در مسابقه شرکت کرده‌اید!\n"
+            "هر نفر فقط می‌تواند یک بار شرکت کند."
+        )
+        return ConversationHandler.END
+    
+    # بررسی وجود کدهای معتبر
+    valid_codes = load_valid_codes()
+    if not valid_codes:
+        await update.message.reply_text(
+            "❌ سیستم در حال حاضر در دسترس نیست.\n"
+            "لطفاً稍后 مجدداً تلاش کنید یا با پشتیبانی تماس بگیرید."
+        )
+        return ConversationHandler.END
+    
     keyboard = [
         [InlineKeyboardButton("رفتن به کانال و عضویت", url=f"https://t.me/{CHANNEL_ID.lstrip('@')}")],
         [InlineKeyboardButton("بررسی عضویت", callback_data="check_member")]
@@ -55,10 +170,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return CHECK_MEMBERSHIP
 
+# بقیه توابع دقیقاً مثل قبلی (button_callback, receive_code, receive_name, submit_entry_callback, cancel)
+# فقط کپی کن از کد قبلی بدون تغییر
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user = query.from_user
+
+    # بررسی مجدد قبل از ادامه
+    if has_user_submitted(user.id):
+        await query.edit_message_text(
+            "❌ شما قبلاً در مسابقه شرکت کرده‌اید!\n"
+            "هر نفر فقط می‌تواند یک بار شرکت کند."
+        )
+        return ConversationHandler.END
 
     try:
         chat = CHANNEL_ID
@@ -82,17 +208,42 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHECK_MEMBERSHIP
 
 async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    if has_user_submitted(user.id):
+        await update.message.reply_text("❌ شما قبلاً در مسابقه شرکت کرده‌اید!")
+        return ConversationHandler.END
+        
     code = update.message.text.strip()
-    context.user_data["code"] = code
-    await update.message.reply_text("کد دریافت شد. لطفاً نام و نام‌خانوادگی خود را وارد کنید:")
+    
+    # اعتبارسنجی کامل کد
+    is_valid, message = is_valid_code(code)
+    if not is_valid:
+        await update.message.reply_text(message + "\n\nلطفاً کد صحیح را وارد کنید:")
+        return WAIT_CODE
+    
+    context.user_data["code"] = code.upper()
+    await update.message.reply_text("✅ کد معتبر! لطفاً نام و نام‌خانوادگی خود را وارد کنید:")
     return WAIT_NAME
 
 async def receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    if has_user_submitted(user.id):
+        await update.message.reply_text("❌ شما قبلاً در مسابقه شرکت کرده‌اید!")
+        return ConversationHandler.END
+        
     full_name = update.message.text.strip()
+    
+    # بررسی نام
+    if len(full_name) < 2 or len(full_name) > 50:
+        await update.message.reply_text("❌ نام باید بین ۲ تا ۵۰ کاراکتر باشد. لطفاً دوباره وارد کنید:")
+        return WAIT_NAME
+        
     context.user_data["full_name"] = full_name
 
     code = context.user_data.get("code", "")
-    username = update.effective_user.username or ""
+    username = user.username or ""
     msg = f"لطفاً اطلاعات را بررسی کن:\n\nکد: {code}\nنام و نام‌خانوادگی: {full_name}\nنام کاربری تلگرام: @{username}\n\nاگر صحیح است «شرکت در مسابقه» را بزن."
     keyboard = [
         [InlineKeyboardButton("شرکت در مسابقه ✅", callback_data="submit_entry")]
@@ -105,6 +256,10 @@ async def submit_entry_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     user = query.from_user
 
+    if has_user_submitted(user.id):
+        await query.edit_message_text("❌ شما قبلاً در مسابقه شرکت کرده‌اید!")
+        return ConversationHandler.END
+
     data = {
         "user_id": user.id,
         "username": user.username,
@@ -114,6 +269,8 @@ async def submit_entry_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         save_submission(data)
+        # علامت گذاری کد به عنوان استفاده شده
+        mark_code_as_used(data["code"])
     except Exception as e:
         logger.exception("خطا در ذخیره‌سازی")
         await query.edit_message_text("خطا در ذخیره اطلاعات. لطفاً دوباره تلاش کنید.")
@@ -138,7 +295,51 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("فرایند کنسل شد.")
     return ConversationHandler.END
 
+# ----------------- دستورات ادمین -----------------
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """مشاهده آمار (فقط ادمین)"""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    
+    try:
+        # تعداد شرکت‌کنندگان
+        participant_count = 0
+        if os.path.exists(CSV_FILE):
+            with open(CSV_FILE, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                participant_count = sum(1 for row in reader) - 1  # منهای هدر
+        
+        # تعداد کدهای استفاده شده
+        used_codes_count = len(load_used_codes())
+        
+        # تعداد کدهای معتبر
+        valid_codes_count = len(load_valid_codes())
+        
+        stats_text = (
+            f"📊 آمار مسابقه:\n\n"
+            f"👥 تعداد شرکت‌کنندگان: {participant_count}\n"
+            f"🔢 کدهای استفاده شده: {used_codes_count}\n"
+            f"🏷️ کدهای موجود: {valid_codes_count}\n"
+            f"📝 کدهای باقی‌مانده: {valid_codes_count - used_codes_count}"
+        )
+        
+        await update.message.reply_text(stats_text)
+        
+    except Exception as e:
+        logger.exception("خطا در دریافت آمار")
+        await update.message.reply_text("خطا در دریافت آمار")
+
 def main():
+    logger.info("🚀 شروع ربات...")
+    
+    # بارگذاری اولیه کدها
+    valid_codes = load_valid_codes()
+    if not valid_codes:
+        logger.error("❌ هیچ کد معتبری بارگذاری نشد! ربات متوقف می‌شود.")
+        return
+    
+    logger.info(f"✅ {len(valid_codes)} کد معتبر بارگذاری شد")
+    
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -162,7 +363,9 @@ def main():
     )
 
     app.add_handler(conv_handler)
-    logger.info("Bot is starting (polling)...")
+    app.add_handler(CommandHandler("stats", admin_stats))
+    
+    logger.info("✅ ربات راه‌اندازی شد")
     app.run_polling()
 
 if __name__ == "__main__":
