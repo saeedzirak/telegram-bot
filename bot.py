@@ -42,17 +42,17 @@ CHECK_MEMBERSHIP, WAIT_CODE, WAIT_NAME, CONFIRM = range(4)
 
 # ----------------- مدیریت کدها -----------------
 def load_valid_codes():
-    """بارگذاری کدهای معتبر از فایل - اگر فایل نبود خطا می‌دهد"""
+    """بارگذاری کدهای معتبر از فایل"""
     try:
         with open(VALID_CODES_FILE, "r", encoding="utf-8") as f:
             codes = {line.strip().upper() for line in f if line.strip()}
             if not codes:
-                logger.error("❌ فایل valid_codes.txt خالی است! لطفاً کدهای خود را در این فایل قرار دهید.")
+                logger.error("❌ فایل valid_codes.txt خالی است!")
                 return set()
             logger.info(f"✅ {len(codes)} کد معتبر از فایل بارگذاری شد")
             return codes
     except FileNotFoundError:
-        logger.error("❌ فایل valid_codes.txt پیدا نشد! لطفاً فایلی با ۲۵۰ کد معتبر ایجاد کنید.")
+        logger.error("❌ فایل valid_codes.txt پیدا نشد!")
         return set()
 
 def load_used_codes():
@@ -68,16 +68,32 @@ def save_used_codes(used_codes):
     with open(USED_CODES_FILE, "w", encoding="utf-8") as f:
         json.dump(list(used_codes), f)
 
+def is_code_already_used_by_other_user(code: str, current_user_id: int) -> bool:
+    """بررسی می‌کند که آیا کد توسط کاربر دیگری استفاده شده است"""
+    try:
+        if not os.path.exists(CSV_FILE):
+            return False
+            
+        with open(CSV_FILE, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if (row["code"] and row["code"].upper() == code.upper() and 
+                    row["user_id"] and int(row["user_id"]) != current_user_id):
+                    return True
+        return False
+    except Exception as e:
+        logger.error(f"خطا در بررسی استفاده کد توسط دیگران: {e}")
+        return False
+
 def is_valid_code_format(code: str) -> bool:
     """بررسی فرمت کد"""
     if len(code) != 6:
         return False
     
-    # فقط حروف بزرگ انگلیسی و اعداد
     pattern = r'^[A-Z0-9]{6}$'
     return bool(re.match(pattern, code))
 
-def is_valid_code(code: str) -> tuple[bool, str]:
+def is_valid_code(code: str, user_id: int) -> tuple[bool, str]:
     """بررسی کامل کد و بازگرداندن پیام خطا"""
     code_upper = code.upper()
     
@@ -93,7 +109,11 @@ def is_valid_code(code: str) -> tuple[bool, str]:
     if code_upper not in valid_codes:
         return False, "❌ کد نامعتبر! این کد در سیستم وجود ندارد."
     
-    # بررسی استفاده نشدن
+    # بررسی استفاده نشدن توسط کاربران دیگر
+    if is_code_already_used_by_other_user(code_upper, user_id):
+        return False, "❌ این کد قبلاً توسط کاربر دیگری استفاده شده است!"
+    
+    # بررسی استفاده نشدن در سیستم
     used_codes = load_used_codes()
     if code_upper in used_codes:
         return False, "❌ این کد قبلاً استفاده شده است!"
@@ -146,7 +166,7 @@ def get_participant_count():
             return 0
         with open(CSV_FILE, "r", encoding="utf-8") as f:
             reader = csv.reader(f)
-            return sum(1 for row in reader) - 1  # منهای هدر
+            return sum(1 for row in reader) - 1
     except Exception as e:
         logger.error(f"خطا در شمارش شرکت‌کنندگان: {e}")
         return 0
@@ -172,7 +192,6 @@ def get_all_participants():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    # بررسی اینکه کاربر قبلاً ثبت نام کرده یا نه
     if has_user_submitted(user.id):
         await update.message.reply_text(
             "❌ شما قبلاً در مسابقه شرکت کرده‌اید!\n"
@@ -180,7 +199,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
     
-    # بررسی وجود کدهای معتبر
     valid_codes = load_valid_codes()
     if not valid_codes:
         await update.message.reply_text(
@@ -205,7 +223,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user = query.from_user
 
-    # بررسی مجدد قبل از ادامه
     if has_user_submitted(user.id):
         await query.edit_message_text(
             "❌ شما قبلاً در مسابقه شرکت کرده‌اید!\n"
@@ -243,8 +260,8 @@ async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     code = update.message.text.strip()
     
-    # اعتبارسنجی کامل کد
-    is_valid, message = is_valid_code(code)
+    # اعتبارسنجی کامل کد با در نظر گرفتن کاربر فعلی
+    is_valid, message = is_valid_code(code, user.id)
     if not is_valid:
         await update.message.reply_text(message + "\n\nلطفاً کد صحیح را وارد کنید:")
         return WAIT_CODE
@@ -262,7 +279,6 @@ async def receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     full_name = update.message.text.strip()
     
-    # بررسی نام
     if len(full_name) < 2 or len(full_name) > 50:
         await update.message.reply_text("❌ نام باید بین ۲ تا ۵۰ کاراکتر باشد. لطفاً دوباره وارد کنید:")
         return WAIT_NAME
@@ -296,7 +312,6 @@ async def submit_entry_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         save_submission(data)
-        # علامت گذاری کد به عنوان استفاده شده
         mark_code_as_used(data["code"])
     except Exception as e:
         logger.exception("خطا در ذخیره‌سازی")
@@ -329,13 +344,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # تعداد شرکت‌کنندگان
         participant_count = get_participant_count()
-        
-        # تعداد کدهای استفاده شده
         used_codes_count = len(load_used_codes())
-        
-        # تعداد کدهای معتبر
         valid_codes_count = len(load_valid_codes())
         
         stats_text = (
@@ -363,25 +373,31 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📢使用方法:\n"
             "/broadcast <پیام>\n\n"
             "مثال:\n"
-            "/broadcast سلام به همه شرکت‌کنندگان! قرعه‌کشی فردا برگزار می‌شود."
+            "/broadcast سلام به همه شرکت‌کنندگان عزیز!"
         )
         return
     
     message_text = ' '.join(context.args)
+    participants_count = get_participant_count()
     
-    # تأیید قبل از ارسال
+    if participants_count == 0:
+        await update.message.reply_text("❌ هیچ کاربری برای ارسال پیام وجود ندارد.")
+        return
+    
+    # ذخیره پیام در context برای استفاده در callback
+    context.user_data["broadcast_message"] = message_text
+    
     keyboard = [
         [
-            InlineKeyboardButton("✅ بله، ارسال کن", callback_data=f"confirm_broadcast:{message_text}"),
+            InlineKeyboardButton("✅ بله، ارسال کن", callback_data="confirm_broadcast"),
             InlineKeyboardButton("❌ لغو", callback_data="cancel_broadcast")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        f"📢 آیا مطمئنی می‌خوای این پیام رو برای همه شرکت‌کنندگان ارسال کنی؟\n\n"
-        f"پیام: {message_text}\n\n"
-        f"تعداد شرکت‌کنندگان: {get_participant_count()}",
+        f"📢 آیا مطمئنی می‌خوای این پیام رو برای {participants_count} کاربر ارسال کنی؟\n\n"
+        f"پیام: {message_text}",
         reply_markup=reply_markup
     )
 
@@ -394,29 +410,31 @@ async def broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("❌ ارسال پیام لغو شد.")
         return
     
-    # استخراج پیام از callback_data
-    message_text = query.data.split("confirm_broadcast:")[1]
+    message_text = context.user_data.get("broadcast_message", "")
+    
+    if not message_text:
+        await query.edit_message_text("❌ پیامی برای ارسال پیدا نشد.")
+        return
     
     await query.edit_message_text("🔄 در حال ارسال پیام به کاربران...")
     
-    # ارسال به همه کاربران
     success_count = 0
     fail_count = 0
-    
     participants = get_all_participants()
     
     for user_id in participants:
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"📢 پیام از مدیریت:\n\n{message_text}"
+                text=f"📢 پیام از مدیریت:\n\n{message_text}\n\n—\nربات مسابقه"
             )
             success_count += 1
         except Exception as e:
             logger.warning(f"خطا در ارسال به کاربر {user_id}: {e}")
             fail_count += 1
-        # تأخیر کوچک برای جلوگیری از محدودیت تلگرام
-        await asyncio.sleep(0.1)
+        
+        # تأخیر برای جلوگیری از محدودیت تلگرام
+        await asyncio.sleep(0.2)
     
     # گزارش به ادمین
     report_text = (
@@ -431,7 +449,6 @@ async def broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_T
 def main():
     logger.info("🚀 شروع ربات...")
     
-    # بارگذاری اولیه کدها
     valid_codes = load_valid_codes()
     if not valid_codes:
         logger.error("❌ هیچ کد معتبری بارگذاری نشد! ربات متوقف می‌شود.")
@@ -467,7 +484,7 @@ def main():
     # دستورات ادمین
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
-    app.add_handler(CallbackQueryHandler(broadcast_confirmation, pattern="^(confirm_broadcast:|cancel_broadcast)"))
+    app.add_handler(CallbackQueryHandler(broadcast_confirmation, pattern="^(confirm_broadcast|cancel_broadcast)$"))
     
     logger.info("✅ ربات راه‌اندازی شد")
     app.run_polling()
