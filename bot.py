@@ -5,6 +5,7 @@ import os
 import sys
 import re
 import json
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler
 
@@ -138,6 +139,35 @@ def save_submission(data: dict):
             "full_name": data.get("full_name", ""),
         })
 
+def get_participant_count():
+    """تعداد کل شرکت‌کنندگان"""
+    try:
+        if not os.path.exists(CSV_FILE):
+            return 0
+        with open(CSV_FILE, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            return sum(1 for row in reader) - 1  # منهای هدر
+    except Exception as e:
+        logger.error(f"خطا در شمارش شرکت‌کنندگان: {e}")
+        return 0
+
+def get_all_participants():
+    """لیست تمام کاربران شرکت‌کننده"""
+    participants = []
+    try:
+        if not os.path.exists(CSV_FILE):
+            return participants
+            
+        with open(CSV_FILE, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row["user_id"]:
+                    participants.append(int(row["user_id"]))
+    except Exception as e:
+        logger.error(f"خطا در دریافت لیست کاربران: {e}")
+    
+    return participants
+
 # ----------------- دستورات ربات -----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -169,9 +199,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
     return CHECK_MEMBERSHIP
-
-# بقیه توابع دقیقاً مثل قبلی (button_callback, receive_code, receive_name, submit_entry_callback, cancel)
-# فقط کپی کن از کد قبلی بدون تغییر
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -303,11 +330,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # تعداد شرکت‌کنندگان
-        participant_count = 0
-        if os.path.exists(CSV_FILE):
-            with open(CSV_FILE, "r", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                participant_count = sum(1 for row in reader) - 1  # منهای هدر
+        participant_count = get_participant_count()
         
         # تعداد کدهای استفاده شده
         used_codes_count = len(load_used_codes())
@@ -329,6 +352,82 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("خطا در دریافت آمار")
         await update.message.reply_text("خطا در دریافت آمار")
 
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ارسال پیام به همه شرکت‌کنندگان (فقط ادمین)"""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        await update.message.reply_text("❌ دسترسی denied!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "📢使用方法:\n"
+            "/broadcast <پیام>\n\n"
+            "مثال:\n"
+            "/broadcast سلام به همه شرکت‌کنندگان! قرعه‌کشی فردا برگزار می‌شود."
+        )
+        return
+    
+    message_text = ' '.join(context.args)
+    
+    # تأیید قبل از ارسال
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ بله، ارسال کن", callback_data=f"confirm_broadcast:{message_text}"),
+            InlineKeyboardButton("❌ لغو", callback_data="cancel_broadcast")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"📢 آیا مطمئنی می‌خوای این پیام رو برای همه شرکت‌کنندگان ارسال کنی؟\n\n"
+        f"پیام: {message_text}\n\n"
+        f"تعداد شرکت‌کنندگان: {get_participant_count()}",
+        reply_markup=reply_markup
+    )
+
+async def broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تأیید و ارسال پیام دسته‌جمعی"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "cancel_broadcast":
+        await query.edit_message_text("❌ ارسال پیام لغو شد.")
+        return
+    
+    # استخراج پیام از callback_data
+    message_text = query.data.split("confirm_broadcast:")[1]
+    
+    await query.edit_message_text("🔄 در حال ارسال پیام به کاربران...")
+    
+    # ارسال به همه کاربران
+    success_count = 0
+    fail_count = 0
+    
+    participants = get_all_participants()
+    
+    for user_id in participants:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"📢 پیام از مدیریت:\n\n{message_text}"
+            )
+            success_count += 1
+        except Exception as e:
+            logger.warning(f"خطا در ارسال به کاربر {user_id}: {e}")
+            fail_count += 1
+        # تأخیر کوچک برای جلوگیری از محدودیت تلگرام
+        await asyncio.sleep(0.1)
+    
+    # گزارش به ادمین
+    report_text = (
+        f"📊 گزارش ارسال دسته‌جمعی:\n\n"
+        f"✅ ارسال موفق: {success_count} کاربر\n"
+        f"❌ ارسال ناموفق: {fail_count} کاربر\n"
+        f"📝 کل کاربران: {len(participants)}"
+    )
+    
+    await query.edit_message_text(report_text)
+
 def main():
     logger.info("🚀 شروع ربات...")
     
@@ -342,6 +441,7 @@ def main():
     
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Conversation Handler برای کاربران عادی
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -363,7 +463,11 @@ def main():
     )
 
     app.add_handler(conv_handler)
+    
+    # دستورات ادمین
     app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CommandHandler("broadcast", admin_broadcast))
+    app.add_handler(CallbackQueryHandler(broadcast_confirmation, pattern="^(confirm_broadcast:|cancel_broadcast)"))
     
     logger.info("✅ ربات راه‌اندازی شد")
     app.run_polling()
