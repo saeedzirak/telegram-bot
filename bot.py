@@ -203,7 +203,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not valid_codes:
         await update.message.reply_text(
             "❌ سیستم در حال حاضر در دسترس نیست.\n"
-            "لطفاً稍后 مجدداً تلاش کنید یا با پشتیبانی تماس بگیرید."
+            "لطفاً مجدداً تلاش کنید یا با پشتیبانی تماس بگیرید."
         )
         return ConversationHandler.END
     
@@ -213,7 +213,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "سلام! برای شرکت در مسابقه ابتدا لطفاً عضو کانال ما شو و سپس دکمهٔ «بررسی عضویت» را بزن.",
+        "سلام! برای شرکت در مسابقه ابتدا لطفاً عضو کانال ما شو و سپس دکمهٔ «بررسی عضویت» را بزن.دوست من راز مطالب ویژه و شانس برنده شدن مسابقه های هفتگی تو پیج اینستاگراممونه!سری بزنین:@usbacc_club",
         reply_markup=reply_markup
     )
     return CHECK_MEMBERSHIP
