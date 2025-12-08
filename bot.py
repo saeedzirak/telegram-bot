@@ -213,7 +213,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "سلام! برای شرکت در مسابقه ابتدا لطفاً عضو کانال ما شو و سپس دکمهٔ «بررسی عضویت» را بزن.دوست من راز مطالب ویژه و شانس برنده شدن مسابقه های هفتگی تو پیج اینستاگراممونه!سری بزنین:@usbacc_club",
+        " سلام! برای شرکت در مسابقه ابتدا لطفاً عضو کانال ما شو و سپس دکمهٔ «بررسی عضویت» را بزن.دوست من راز مطالب ویژه و شانس برنده شدن مسابقه های هفتگی تو پیج اینستاگراممونه!سری بزنین: https://www.instagram.com/usbacc_club?igsh=dzN2NGU0NHVoMnZx",
         reply_markup=reply_markup
     )
     return CHECK_MEMBERSHIP
